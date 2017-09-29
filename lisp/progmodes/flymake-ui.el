@@ -352,42 +352,50 @@ The recognized optional keyword arguments are:
 
 (defvar flymake-diagnostic-types-alist
   `((:error
-     . ((category . flymake-error)
-        (mode-line-face . compilation-error)))
+     . ((flymake-category . flymake-error)))
     (:warning
-     . ((category . flymake-warning)
-        (mode-line-face . compilation-warning)))
+     . ((flymake-category . flymake-warning)))
     (:note
-     . ((category . flymake-note)
-        (mode-line-face . compilation-info))))
+     . ((flymake-category . flymake-note))))
   "Alist ((KEY . PROPS)*) of properties of flymake error types.
 KEY can be anything passed as `:type' to `flymake-diag-make'.
 
 PROPS is an alist of properties that are applied, in order, to
-the overlays representing diagnostics. Every property pertaining
-to overlays, including `category', can be used (see Info
-Node `(elisp)Overlay Properties'). Some additional properties
-with flymake-specific meaning can also be used.
+the diagnostics of each type.  The recognized properties are:
 
-* `bitmap' is a bitmap displayed in the fringe according to
-  `flymake-fringe-indicator-position'
+* Every property pertaining to overlays, except `category' and
+  `evaporate' (see Info Node `(elisp)Overlay Properties'), used
+  affect the appearance of Flymake annotations.
 
-* `severity' is a non-negative integer specifying the
-  diagnostic's severity. The higher, the more serious. If
-  `priority' is not specified, `severity' is used to set it and
-  help sort overlapping overlays.")
+* `bitmap', an image displayed in the fringe according to
+  `flymake-fringe-indicator-position'.  The value actually
+  follows the syntax of `flymake-error-bitmap' (which see).  It
+  is overriden by any `before-string' overlay property.
+
+* `severity', a non-negative integer specifying the diagnostic's
+  severity.  The higher, the more serious.  If the overlay
+  priority `priority' is not specified, `severity' is used to set
+  it and help sort overlapping overlays.
+
+* `flymake-category', a symbol whose property list is considered
+  as a default for missing values of any other properties.  This
+  is useful to backend authors when creating new diagnostic types
+  that differ from an existing type by only a few properties.")
 
 (put 'flymake-error 'face 'flymake-error)
 (put 'flymake-error 'bitmap 'flymake-error-bitmap)
 (put 'flymake-error 'severity (warning-numeric-level :error))
+(put 'flymake-error 'mode-line-face 'compilation-error)
 
 (put 'flymake-warning 'face 'flymake-warning)
 (put 'flymake-warning 'bitmap 'flymake-warning-bitmap)
 (put 'flymake-warning 'severity (warning-numeric-level :warning))
+(put 'flymake-warning 'mode-line-face 'compilation-warning)
 
 (put 'flymake-note 'face 'flymake-note)
 (put 'flymake-note 'bitmap 'flymake-note-bitmap)
 (put 'flymake-note 'severity (warning-numeric-level :debug))
+(put 'flymake-note 'mode-line-face 'compilation-info)
 
 (defun flymake--lookup-type-property (type prop &optional default)
   "Look up PROP for TYPE in `flymake-diagnostic-types-alist'.
@@ -400,7 +408,7 @@ return DEFAULT."
                   (prop-probe (assoc prop alist)))
              (if prop-probe
                  (cdr prop-probe)
-               (if-let* ((cat (assoc-default 'category alist))
+               (if-let* ((cat (assoc-default 'flymake-category alist))
                          (plist (and (symbolp cat)
                                      (symbol-plist cat)))
                          (cat-probe (plist-member plist prop)))
@@ -428,22 +436,27 @@ return DEFAULT."
   (when-let* ((ov (make-overlay
                    (flymake--diag-beg diagnostic)
                    (flymake--diag-end diagnostic))))
-    ;; First copy over to ov every property in the relevant alist.
+    ;; First set `category' in the overlay, then copy over every other
+    ;; property.
     ;;
-    (cl-loop for (k . v) in
-             (assoc-default (flymake--diag-type diagnostic)
-                            flymake-diagnostic-types-alist)
-             do (overlay-put ov k v))
-    ;; Now ensure some defaults are set
+    (let ((alist (assoc-default (flymake--diag-type diagnostic)
+                                flymake-diagnostic-types-alist)))
+      (overlay-put ov 'category (assoc-default 'flymake-category alist))
+      (cl-loop for (k . v) in alist
+               unless (eq k 'category)
+               do (overlay-put ov k v)))
+    ;; Now ensure some essential defaults are set
     ;;
     (cl-flet ((default-maybe
                 (prop value)
                 (unless (or (plist-member (overlay-properties ov) prop)
-                            (let ((cat (overlay-get ov 'category)))
+                            (let ((cat (overlay-get ov
+                                                    'flymake-category)))
                               (and cat
                                    (plist-member (symbol-plist cat) prop))))
                   (overlay-put ov prop value))))
       (default-maybe 'bitmap 'flymake-error-bitmap)
+      (default-maybe 'face 'flymake-error)
       (default-maybe 'before-string
         (flymake--fringe-overlay-spec
          (overlay-get ov 'bitmap)))
@@ -796,16 +809,20 @@ applied."
                              diags))
                      flymake--diagnostics-table)
             (cl-loop
-             for type in
-             (mapcar #'car flymake-diagnostic-types-alist)
+             for (type . severity)
+             in (cl-sort (mapcar (lambda (type)
+                                   (cons type (flymake--lookup-type-property
+                                               type
+                                               'severity
+                                               (warning-numeric-level :error))))
+                                 (cl-union (hash-table-keys by-type)
+                                           '(:error :warning)))
+                         #'>
+                         :key #'cdr)
              for diags = (gethash type by-type)
              for face = (flymake--lookup-type-property type
                                                        'mode-line-face
                                                        'compilation-error)
-             for severity = (flymake--lookup-type-property
-                             type
-                             'severity
-                             (warning-numeric-level :error))
              when (or diags
                       (>= severity (warning-numeric-level :warning)))
              collect `(:propertize
